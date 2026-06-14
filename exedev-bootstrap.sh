@@ -557,9 +557,8 @@ make templates
 go build -o bin/shelley ./cmd/shelley
 
 # Wrapper: sets ANTHROPIC_API_KEY so shelley's model discovery activates the
-# Anthropic catalog. sudo strips the environment, so the var must be injected
-# inside the script rather than exported before the sudo call. Requests still
-# route through ccproxy (OAuth) — the key value itself is never sent upstream.
+# Anthropic catalog. Any non-empty value works — requests still route through
+# ccproxy (OAuth) so the key value is never sent upstream.
 cat > "$SHELLEY_DIR/bin/shelley-serve" << 'WEOF'
 #!/bin/bash
 export ANTHROPIC_API_KEY=dummy
@@ -568,16 +567,12 @@ WEOF
 chmod +x "$SHELLEY_DIR/bin/shelley-serve"
 echo ">>> Shelley built successfully"
 
-# === Grant Shelley passwordless sudo (needed for boot-time start and escalated tools) ===
-echo "exedev ALL=(root) NOPASSWD: $SHELLEY_DIR/bin/shelley-serve" \
-    | sudo tee /etc/sudoers.d/shelley > /dev/null
-sudo chmod 440 /etc/sudoers.d/shelley
-
 # === Start Shelley ===
 pkill -f "shelley serve" 2>/dev/null || true
 sleep 1
 
-nohup sudo "$SHELLEY_DIR/bin/shelley-serve" serve --port "$SHELLEY_PORT" \
+cd "$HOME"
+nohup "$SHELLEY_DIR/bin/shelley-serve" serve --port "$SHELLEY_PORT" \
     > /tmp/shelley.log 2>&1 &
 echo ">>> Shelley starting..."
 
@@ -610,7 +605,7 @@ nohup ccproxy serve --config "$CCPROXY_CONFIG" >> /tmp/ccproxy.log 2>&1 &
 
 pkill -f "shelley serve" 2>/dev/null || true
 sleep 1
-nohup sudo "$SHELLEY_DIR/bin/shelley-serve" serve --port $SHELLEY_PORT >> /tmp/shelley.log 2>&1 &
+cd $HOME && nohup "$SHELLEY_DIR/bin/shelley-serve" serve --port $SHELLEY_PORT >> /tmp/shelley.log 2>&1 &
 
 printf 'ccproxy : http://127.0.0.1:$CCPROXY_PORT\nshelley : http://127.0.0.1:$SHELLEY_PORT\n' > $HOME/urls.txt
 SEOF
