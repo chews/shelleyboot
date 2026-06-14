@@ -547,6 +547,63 @@ PYEOF
 python3 /tmp/patch_shelley_loop.py "$SHELLEY_DIR"
 rm /tmp/patch_shelley_loop.py
 
+# Patch browse.go: prefer /opt/chromium/chrome (persists across VM resets) over
+# the default chromedp path discovery, which on Ubuntu 24.04 finds the snap stub.
+python3 - "$SHELLEY_DIR" << 'PYEOF'
+import sys, os
+
+path = os.path.join(sys.argv[1], "claudetool", "browse", "browse.go")
+with open(path) as f:
+    src = f.read()
+
+old = (
+    '\t// Initialize a new browser\n'
+    '\topts := chromedp.DefaultExecAllocatorOptions[:]\n'
+    '\topts = append(opts, chromedp.NoSandbox)'
+)
+new = (
+    '\t// Initialize a new browser\n'
+    '\topts := chromedp.DefaultExecAllocatorOptions[:]\n'
+    '\t// Prefer /opt/chromium/chrome (persists across system resets on cloud VMs).\n'
+    '\tif _, err := os.Stat("/opt/chromium/chrome"); err == nil {\n'
+    '\t\topts = append(opts, chromedp.ExecPath("/opt/chromium/chrome"))\n'
+    '\t}\n'
+    '\topts = append(opts, chromedp.NoSandbox)'
+)
+if old not in src:
+    print("SKIP (already applied or not found): browse.go /opt/chromium ExecPath", file=sys.stderr)
+else:
+    with open(path, "w") as f:
+        f.write(src.replace(old, new, 1))
+    print("Patched: browse.go /opt/chromium ExecPath")
+PYEOF
+
+# === Install Chromium to /opt (persists across VM resets) ===
+# Ubuntu 24.04's chromium-browser package is a snap stub, not a real binary.
+# Download Chrome for Testing (official standalone build from Google) instead.
+if [ ! -x "/opt/chromium/chrome" ]; then
+    echo ">>> Installing Chrome for Testing to /opt/chromium..."
+    _CHROME_URL=$(curl -sf \
+        'https://googlechromelabs.github.io/chrome-for-testing/last-known-good-versions-with-downloads.json' \
+        | python3 -c "
+import json,sys
+data=json.load(sys.stdin)
+for dl in data['channels']['Stable']['downloads']['chrome']:
+    if dl['platform']=='linux64':
+        print(dl['url']); break
+")
+    curl -fsSL "$_CHROME_URL" -o /tmp/chrome.zip
+    unzip -q /tmp/chrome.zip -d /tmp/chrome-extract
+    sudo rm -rf /opt/chromium
+    sudo mv /tmp/chrome-extract/chrome-linux64 /opt/chromium
+    rm -f /tmp/chrome.zip
+    sudo chmod +x /opt/chromium/chrome
+    unset _CHROME_URL
+    echo ">>> Chromium installed: $(/opt/chromium/chrome --version)"
+else
+    echo ">>> Chromium already at /opt/chromium/chrome: $(/opt/chromium/chrome --version)"
+fi
+
 # === Build Shelley ===
 cd "$SHELLEY_DIR/ui"
 pnpm --silent install --frozen-lockfile
