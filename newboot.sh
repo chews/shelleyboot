@@ -567,6 +567,26 @@ PYEOF
 python3 /tmp/patch_shelley_loop.py "$SHELLEY_DIR"
 rm /tmp/patch_shelley_loop.py
 
+# Patch bash.go: add Opus models to PreferredToolModels so keyword_search's
+# internal LLM call uses Opus via ccproxy before falling back to Sonnet.
+python3 - "$SHELLEY_DIR" << 'PYEOF'
+import sys, os
+
+path = os.path.join(sys.argv[1], "claudetool", "bash.go")
+with open(path) as f:
+    src = f.read()
+
+old = 'var PreferredToolModels = []string{"gpt-oss-20b-fireworks", "claude-sonnet-4.6", "claude-sonnet-4.5", "predictable"}'
+new = 'var PreferredToolModels = []string{"gpt-oss-20b-fireworks", "claude-opus-4.8", "claude-opus-4.7", "claude-opus-4.6", "claude-opus-4.5", "claude-sonnet-4.6", "claude-sonnet-4.5", "predictable"}'
+
+if old not in src:
+    print("SKIP (already applied or not found): bash.go PreferredToolModels", file=sys.stderr)
+else:
+    with open(path, "w") as f:
+        f.write(src.replace(old, new, 1))
+    print("Patched: bash.go PreferredToolModels (added Opus models)")
+PYEOF
+
 # === Build Shelley ===
 cd "$SHELLEY_DIR/ui"
 pnpm --silent install --frozen-lockfile
