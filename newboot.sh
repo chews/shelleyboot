@@ -5,7 +5,29 @@ BOOT_LOG="$HOME/boot.log"
 exec > >(tee "$BOOT_LOG") 2>&1
 echo "=== newboot.sh started at $(date) ==="
 
-ACCESS_TOKEN=auhYffpbliMIP26zylFnojCoSJ0wHhHWqw6hQhaq
+# === loclx tunnel authkey (optional) ===
+# The loclx HTTPS tunnel is optional. Provide a LocalXpose authkey to enable it;
+# leave blank (or run non-interactively) to skip loclx install and tunnel setup.
+# The key is prompted at runtime so it never lives in this repo.
+ACCESS_TOKEN=""
+if [ -t 0 ]; then
+    printf '\n>>> loclx tunnel is optional.\n'
+    printf '    Enter your LocalXpose authkey to enable the public HTTPS tunnel,\n'
+    printf '    or press Enter to skip it: '
+    read -rs ACCESS_TOKEN
+    printf '\n'
+else
+    echo ">>> Non-interactive shell: skipping loclx tunnel (no authkey prompt)."
+fi
+
+if [ -n "$ACCESS_TOKEN" ]; then
+    ENABLE_LOCLX=1
+    echo ">>> loclx tunnel ENABLED."
+else
+    ENABLE_LOCLX=0
+    echo ">>> loclx tunnel DISABLED (no authkey provided)."
+fi
+
 CCPROXY_CONFIG="$HOME/.config/ccproxy/config.toml"
 CCPROXY_PORT=8585
 SHELLEY_DIR="$HOME/shelley"
@@ -96,7 +118,7 @@ node --version
 
 command -v pnpm &>/dev/null || sudo npm install -g pnpm
 
-if ! command -v loclx &>/dev/null; then
+if [ "$ENABLE_LOCLX" = "1" ] && ! command -v loclx &>/dev/null; then
     sudo npm install -g loclx
     LOCLX_BIN_DIR="/usr/local/lib/node_modules/loclx/bin"
     LOCLX_ZIP="$LOCLX_BIN_DIR/loclx-linux-${LOCLX_ARCH}.zip"
@@ -384,18 +406,25 @@ python3 /tmp/patch_ccproxy.py
 rm /tmp/patch_ccproxy.py
 
 # === Write access token and env vars ===
-echo "$ACCESS_TOKEN" > "$HOME/.access"
+BASHRC_VARS=(
+    "export PATH=/usr/local/go/bin:\$HOME/.local/bin:\$PATH"
+    "export GOPATH=$HOME/go"
+)
+if [ "$ENABLE_LOCLX" = "1" ]; then
+    echo "$ACCESS_TOKEN" > "$HOME/.access"
+    chmod 600 "$HOME/.access"
+    BASHRC_VARS+=(
+        "export ACCESS_TOKEN=$ACCESS_TOKEN"
+        "export LX_ACCESS_TOKEN=$ACCESS_TOKEN"
+    )
+fi
 
-for var in \
-    "export PATH=/usr/local/go/bin:\$HOME/.local/bin:\$PATH" \
-    "export GOPATH=$HOME/go" \
-    "export ACCESS_TOKEN=$ACCESS_TOKEN" \
-    "export LX_ACCESS_TOKEN=$ACCESS_TOKEN"; do
+for var in "${BASHRC_VARS[@]}"; do
     grep -qxF "$var" "$HOME/.bashrc" || echo "$var" >> "$HOME/.bashrc"
 done
 
 export GOPATH="$HOME/go"
-export LX_ACCESS_TOKEN="$ACCESS_TOKEN"
+[ "$ENABLE_LOCLX" = "1" ] && export LX_ACCESS_TOKEN="$ACCESS_TOKEN"
 
 # === Authenticate ccproxy (OAuth) ===
 if ! ccproxy auth status claude-api 2>/dev/null | grep -q "Authenticated"; then
@@ -635,52 +664,51 @@ fi
 echo ">>> Shelley running on http://127.0.0.1:$SHELLEY_PORT"
 
 # === Start loclx HTTPS tunnel to Shelley in a screen session ===
-pkill -f "loclx tunnel" 2>/dev/null || true
-screen -wipe 2>/dev/null || true
-sleep 1
+TUNNEL_DOMAIN=""
+if [ "$ENABLE_LOCLX" = "1" ]; then
+    pkill -f "loclx tunnel" 2>/dev/null || true
+    screen -wipe 2>/dev/null || true
+    sleep 1
 
-# Run loclx inside a self-restarting loop so transient failures (network blip,
-# server hiccup) don't permanently kill the tunnel.
-screen -dmS shelley-tunnel bash -c "
+    # Run loclx inside a self-restarting loop so transient failures (network blip,
+    # server hiccup) don't permanently kill the tunnel.
+    screen -dmS shelley-tunnel bash -c "
 while true; do
     > /tmp/loclx.log
     LX_ACCESS_TOKEN=$ACCESS_TOKEN loclx tunnel http --to 127.0.0.1:$SHELLEY_PORT --https-redirect >> /tmp/loclx.log 2>&1
     sleep 10
 done"
-echo ">>> loclx tunnel starting in screen session 'shelley-tunnel'..."
+    echo ">>> loclx tunnel starting in screen session 'shelley-tunnel'..."
 
-for i in $(seq 1 15); do
-    if grep -oP '[a-z0-9]+\.loclx\.io' /tmp/loclx.log 2>/dev/null | grep -q .; then
-        break
+    for i in $(seq 1 15); do
+        if grep -oP '[a-z0-9]+\.loclx\.io' /tmp/loclx.log 2>/dev/null | grep -q .; then
+            break
+        fi
+        sleep 1
+    done
+
+    TUNNEL_DOMAIN=$(grep -oP '[a-z0-9]+\.loclx\.io' /tmp/loclx.log 2>/dev/null | head -1)
+
+    if [ -z "$TUNNEL_DOMAIN" ]; then
+        echo "ERROR: loclx tunnel failed to start. Log:" >&2
+        cat /tmp/loclx.log >&2
+        exit 1
     fi
-    sleep 1
-done
-
-TUNNEL_DOMAIN=$(grep -oP '[a-z0-9]+\.loclx\.io' /tmp/loclx.log 2>/dev/null | head -1)
-
-if [ -z "$TUNNEL_DOMAIN" ]; then
-    echo "ERROR: loclx tunnel failed to start. Log:" >&2
-    cat /tmp/loclx.log >&2
-    exit 1
+else
+    echo ">>> Skipping loclx tunnel (disabled)."
 fi
 
 # === Register ccproxy and Shelley to start at boot ===
+# The startup script always launches ccproxy + Shelley. The loclx tunnel block is
+# only appended when loclx is enabled, so disabled installs boot without a tunnel.
 STARTUP_SCRIPT="$HOME/.start-services.sh"
 cat > "$STARTUP_SCRIPT" << SEOF
 #!/bin/bash
 export HOME=$HOME
 export PATH="$HOME/.local/bin:/usr/local/go/bin:/usr/local/bin:/usr/bin:/bin"
 export ANTHROPIC_API_KEY=dummy
-export LX_ACCESS_TOKEN=$ACCESS_TOKEN
 
 echo "=== start-services \$(date -u +%Y-%m-%dT%H:%M:%SZ) ===" >> /tmp/start-services.log
-
-# Wait up to 30s for DNS before starting loclx (crontab fires before network is ready)
-for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
-    getent hosts loclx.io &>/dev/null && break
-    sleep 2
-done
-unset _i
 
 pkill -f "ccproxy serve" 2>/dev/null || true
 sleep 1
@@ -689,6 +717,18 @@ nohup ccproxy serve --config "$CCPROXY_CONFIG" >> /tmp/ccproxy.log 2>&1 &
 pkill -f "shelley serve" 2>/dev/null || true
 sleep 1
 nohup sudo "$SHELLEY_DIR/bin/shelley-serve" serve --port $SHELLEY_PORT >> /tmp/shelley.log 2>&1 &
+SEOF
+
+if [ "$ENABLE_LOCLX" = "1" ]; then
+cat >> "$STARTUP_SCRIPT" << SEOF
+export LX_ACCESS_TOKEN=$ACCESS_TOKEN
+
+# Wait up to 30s for DNS before starting loclx (crontab fires before network is ready)
+for _i in 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15; do
+    getent hosts loclx.io &>/dev/null && break
+    sleep 2
+done
+unset _i
 
 pkill -f "loclx tunnel" 2>/dev/null || true
 screen -wipe 2>/dev/null || true
@@ -711,6 +751,12 @@ if [ -n "\$_domain" ]; then
 fi
 unset _i _domain
 SEOF
+else
+cat >> "$STARTUP_SCRIPT" << SEOF
+
+printf 'ccproxy : http://127.0.0.1:$CCPROXY_PORT\nshelley : http://127.0.0.1:$SHELLEY_PORT\n' > $HOME/urls.txt
+SEOF
+fi
 chmod +x "$STARTUP_SCRIPT"
 
 (crontab -l 2>/dev/null | grep -vF ".start-services.sh" || true; echo "@reboot $STARTUP_SCRIPT") | crontab -
@@ -721,6 +767,8 @@ echo ">>> Services registered to start at boot"
 #   - Every first terminal session after boot shows a UTF8 QR code inline
 #   - Desktop login (LXDE / MATE / GNOME) opens a terminal window with the QR
 # All files are overwritten on each newboot.sh run so they stay in sync.
+# Only meaningful when the loclx tunnel is enabled (the QR encodes its URL).
+if [ "$ENABLE_LOCLX" = "1" ]; then
 
 cat > "$HOME/.shelley-welcome.sh" << 'QRWELCOME'
 #!/bin/bash
@@ -865,18 +913,24 @@ source "$HOME/.shelley-welcome.sh" 3
 QRBASHRC
 echo ">>> QR code boot display configured"
 
+else
+    echo ">>> Skipping QR code boot display (loclx tunnel disabled)."
+fi
+
 # === Save and print URLs ===
-cat > "$HOME/urls.txt" << URLEOF
-ccproxy : http://127.0.0.1:$CCPROXY_PORT
-shelley : http://127.0.0.1:$SHELLEY_PORT
-tunnel  : https://$TUNNEL_DOMAIN
-URLEOF
+{
+    echo "ccproxy : http://127.0.0.1:$CCPROXY_PORT"
+    echo "shelley : http://127.0.0.1:$SHELLEY_PORT"
+    [ "$ENABLE_LOCLX" = "1" ] && echo "tunnel  : https://$TUNNEL_DOMAIN"
+} > "$HOME/urls.txt"
 
 echo ""
 echo "=========================================="
 echo "  ccproxy  : http://127.0.0.1:$CCPROXY_PORT"
 echo "  shelley  : http://127.0.0.1:$SHELLEY_PORT"
-echo "  tunnel   : https://$TUNNEL_DOMAIN"
-echo "  screen   : screen -r shelley-tunnel"
+if [ "$ENABLE_LOCLX" = "1" ]; then
+    echo "  tunnel   : https://$TUNNEL_DOMAIN"
+    echo "  screen   : screen -r shelley-tunnel"
+fi
 echo "  urls file: $HOME/urls.txt"
 echo "=========================================="
