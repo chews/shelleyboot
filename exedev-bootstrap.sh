@@ -5,7 +5,27 @@ BOOT_LOG="$HOME/boot.log"
 exec > >(tee "$BOOT_LOG") 2>&1
 echo "=== exedev-bootstrap.sh started at $(date) ==="
 
-ACCESS_TOKEN=auhYffpbliMIP26zylFnojCoSJ0wHhHWqw6hQhaq
+# === loclx tunnel authkey (optional) ===
+# Provide a LocalXpose authkey to write it to ~/.access for the tunnel; leave
+# blank (or run non-interactively) to skip. Prompted at runtime so the key never
+# lives in this repo.
+ACCESS_TOKEN=""
+if [ -t 0 ]; then
+    printf '\n>>> loclx tunnel authkey is optional.\n'
+    printf '    Enter your LocalXpose authkey to write it to ~/.access,\n'
+    printf '    or press Enter to skip it: '
+    read -rs ACCESS_TOKEN
+    printf '\n'
+else
+    echo ">>> Non-interactive shell: skipping loclx authkey prompt."
+fi
+
+if [ -n "$ACCESS_TOKEN" ]; then
+    echo ">>> loclx authkey provided."
+else
+    echo ">>> No loclx authkey provided (skipping ~/.access)."
+fi
+
 CCPROXY_CONFIG="$HOME/.config/ccproxy/config.toml"
 CCPROXY_PORT=8585
 SHELLEY_DIR="$HOME/shelley"
@@ -366,7 +386,10 @@ python3 /tmp/patch_ccproxy.py
 rm /tmp/patch_ccproxy.py
 
 # === Write access token and env vars ===
-echo "$ACCESS_TOKEN" > "$HOME/.access"
+if [ -n "$ACCESS_TOKEN" ]; then
+    echo "$ACCESS_TOKEN" > "$HOME/.access"
+    chmod 600 "$HOME/.access"
+fi
 
 for var in \
     "export PATH=/usr/local/go/bin:\$HOME/.local/bin:\$PATH" \
